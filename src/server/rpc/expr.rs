@@ -1,6 +1,9 @@
-//! This module has logic to translate gRPC `Predicate` nodes into the
-//! native storage system predicate form,  `storage::Predicates`
-
+//! This module has logic to translate gRPC sructures into the native
+//! storage system form by extending the builders for those structures with new traits
+//!
+//! RPCPredicate --> storage::Predicates
+//!
+//! Aggregates / windows --> storage::GroupByAndAggregate
 use std::convert::TryFrom;
 
 use arrow_deps::datafusion::{
@@ -8,19 +11,49 @@ use arrow_deps::datafusion::{
     scalar::ScalarValue,
 };
 use generated_types::{
-    node::Comparison as RPCComparison, node::Logical as RPCLogical, node::Value as RPCValue,
-    Node as RPCNode, Predicate as RPCPredicate,
+    aggregate::AggregateType as RPCAggregateType, node::Comparison as RPCComparison,
+    node::Logical as RPCLogical, node::Value as RPCValue, read_group_request::Group as RPCGroup,
+    Aggregate as RPCAggregate, Duration as RPCDuration, Node as RPCNode, Predicate as RPCPredicate,
+    Window as RPCWindow,
 };
 use snafu::{ResultExt, Snafu};
+use storage::groupby::WindowDuration;
+use storage::groupby::{Aggregate as StorageAggregate, GroupByAndAggregate};
 use storage::predicate::PredicateBuilder;
+use tracing::warn;
 
 #[derive(Debug, Snafu)]
 pub enum Error {
+    #[snafu(display("Error creating aggregate: Unexpected empty aggregate"))]
+    EmptyAggregate {},
+
+    #[snafu(display("Error creating aggregate: Unsupported none aggregate"))]
+    NoneAggregate {},
+
+    #[snafu(display("Error creating aggregate: Exactly one aggregate is supported, but {} were supplied: {:?}",
+                    aggregates.len(), aggregates))]
+    AggregateNotSingleton { aggregates: Vec<RPCAggregate> },
+
+    #[snafu(display("Error creating aggregate: Unknown aggregate type {}", aggregate_type))]
+    UnknownAggregate { aggregate_type: i32 },
+
+    #[snafu(display("Error creating aggregate: Unknown group type: {}", group_type))]
+    UnknownGroup { group_type: i32 },
+
     #[snafu(display("Error creating predicate: Unexpected empty predicate: Node"))]
     EmptyPredicateNode {},
 
-    #[snafu(display("Error creating predicate: Unexpected empty predicate: Value"))]
+    #[snafu(display("Error creating predicate: Unexpected empty predicate value"))]
     EmptyPredicateValue {},
+
+    #[snafu(display("Error parsing window bounds: No window specified"))]
+    EmptyWindow {},
+
+    #[snafu(display("Error parsing window bounds duration '{}': {}", location, description))]
+    InvalidDuration {
+        location: String,
+        description: String,
+    },
 
     #[snafu(display("Internal error: found measurement tag reference in unexpected location"))]
     InternalInvalidMeasurementReference {},
@@ -445,6 +478,136 @@ fn build_binary_expr(op: Operator, inputs: Vec<Expr>) -> Result<Expr> {
     }
 }
 
+pub fn make_read_group_aggregate(
+    aggregate: Option<RPCAggregate>,
+    _group: RPCGroup,
+    group_keys: Vec<String>,
+) -> Result<GroupByAndAggregate> {
+    let gby_agg = GroupByAndAggregate::Columns {
+        agg: convert_aggregate(aggregate)?,
+        group_columns: group_keys,
+    };
+    Ok(gby_agg)
+}
+
+/// Builds GroupByAndAggregate::Windows s
+pub fn make_read_window_aggregate(
+    aggregates: Vec<RPCAggregate>,
+    window_every: i64,
+    offset: i64,
+    window: Option<RPCWindow>,
+) -> Result<GroupByAndAggregate> {
+    // only support single aggregate for now
+    if aggregates.len() != 1 {
+        return AggregateNotSingleton { aggregates }.fail();
+    }
+    let agg = convert_aggregate(Some(aggregates.into_iter().next().unwrap()))?;
+
+    // Translation from these parameters to window bound
+    // is defined in the Go code:
+    // https://github.com/influxdata/idpe/pull/8636/files#diff-94c0a8d7e427e2d7abe49f01dced50ad776b65ec8f2c8fb2a2c8b90e2e377ed5R82
+    //
+    // Quoting:
+    //
+    // Window and the WindowEvery/Offset should be mutually
+    // exclusive. If you set either the WindowEvery or Offset with
+    // nanosecond values, then the Window will be ignored
+
+    let (every, offset) = if window_every > 0 || offset > 0 {
+        // warn if window is being ignored
+        if window.is_some() {
+            warn!("window_every {} or offset {} was non zero, so ignoring window specification '{:?}' on read_window_aggregate",
+                  window_every, offset, window);
+        }
+        (
+            WindowDuration::from_nanoseconds(window_every),
+            WindowDuration::from_nanoseconds(offset),
+        )
+    } else {
+        let window = window.ok_or(Error::EmptyWindow {})?;
+
+        (
+            convert_duration(window.every).map_err(|e| Error::InvalidDuration {
+                location: "window.every".into(),
+                description: e.into(),
+            })?,
+            convert_duration(window.offset).map_err(|e| Error::InvalidDuration {
+                location: "window.offset".into(),
+                description: e.into(),
+            })?,
+        )
+    };
+
+    Ok(GroupByAndAggregate::Window { agg, every, offset })
+}
+
+fn convert_duration(duration: Option<RPCDuration>) -> Result<WindowDuration, &'static str> {
+    let duration = duration.ok_or("No duration specified in RPC")?;
+
+    match (duration.nsecs != 0, duration.months != 0) {
+        (true, false) => Ok(WindowDuration::from_nanoseconds(duration.nsecs)),
+        (false, true) => Ok(WindowDuration::from_months(
+            duration.months,
+            duration.negative,
+        )),
+        // Same error as Go code: https://github.com/influxdata/flux/blob/master/execute/window.go#L36
+        (true, true) => Err("duration used as an interval cannot mix month and nanosecond units"),
+        (false, false) => Err("duration used as an interval cannot be zero"),
+    }
+}
+
+fn convert_aggregate(aggregate: Option<RPCAggregate>) -> Result<StorageAggregate> {
+    let aggregate = match aggregate {
+        None => return EmptyAggregate {}.fail(),
+        Some(aggregate) => aggregate,
+    };
+
+    let storage_aggregate = match convert_aggregate_type(aggregate.r#type)? {
+        RPCAggregateType::None => return NoneAggregate {}.fail(),
+        RPCAggregateType::Sum => StorageAggregate::Sum,
+        RPCAggregateType::Count => StorageAggregate::Count,
+        RPCAggregateType::Min => StorageAggregate::Min,
+        RPCAggregateType::Max => StorageAggregate::Max,
+        RPCAggregateType::First => StorageAggregate::First,
+        RPCAggregateType::Last => StorageAggregate::Last,
+        RPCAggregateType::Mean => StorageAggregate::Mean,
+    };
+
+    Ok(storage_aggregate)
+}
+
+fn convert_aggregate_type(aggregate_type: i32) -> Result<RPCAggregateType> {
+    if aggregate_type == RPCAggregateType::None as i32 {
+        Ok(RPCAggregateType::None)
+    } else if aggregate_type == RPCAggregateType::Sum as i32 {
+        Ok(RPCAggregateType::Sum)
+    } else if aggregate_type == RPCAggregateType::Count as i32 {
+        Ok(RPCAggregateType::Count)
+    } else if aggregate_type == RPCAggregateType::Min as i32 {
+        Ok(RPCAggregateType::Min)
+    } else if aggregate_type == RPCAggregateType::Max as i32 {
+        Ok(RPCAggregateType::Max)
+    } else if aggregate_type == RPCAggregateType::First as i32 {
+        Ok(RPCAggregateType::First)
+    } else if aggregate_type == RPCAggregateType::Last as i32 {
+        Ok(RPCAggregateType::Last)
+    } else if aggregate_type == RPCAggregateType::Mean as i32 {
+        Ok(RPCAggregateType::Mean)
+    } else {
+        UnknownAggregate { aggregate_type }.fail()
+    }
+}
+
+pub fn convert_group_type(group: i32) -> Result<RPCGroup> {
+    if group == RPCGroup::None as i32 {
+        Ok(RPCGroup::None)
+    } else if group == RPCGroup::By as i32 {
+        Ok(RPCGroup::By)
+    } else {
+        return UnknownGroup { group_type: group }.fail();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use generated_types::node::Type as RPCNodeType;
@@ -827,6 +990,205 @@ mod tests {
         match res {
             Ok(_) => "UNEXPECTED SUCCESS".into(),
             Err(e) => format!("{}", e),
+        }
+    }
+
+    #[test]
+    fn test_make_read_window_aggregate() {
+        let pos_5_ns = WindowDuration::from_nanoseconds(5);
+        let pos_10_ns = WindowDuration::from_nanoseconds(10);
+        let pos_3_months = WindowDuration::from_months(3, false);
+        let neg_1_months = WindowDuration::from_months(1, true);
+
+        let agg = make_read_window_aggregate(vec![], 5, 10, None);
+        let expected =
+            "Error creating aggregate: Exactly one aggregate is supported, but 0 were supplied: []";
+        assert_eq!(error_result_to_string(agg), expected);
+
+        let agg =
+            make_read_window_aggregate(vec![make_aggregate(1), make_aggregate(2)], 5, 10, None);
+        let expected = "Error creating aggregate: Exactly one aggregate is supported, but 2 were supplied: [Aggregate { r#type: Sum }, Aggregate { r#type: Count }]";
+        assert_eq!(error_result_to_string(agg), expected);
+
+        // now window specified
+        let agg = make_read_window_aggregate(vec![make_aggregate(1)], 0, 0, None);
+        let expected = "Error parsing window bounds: No window specified";
+        assert_eq!(error_result_to_string(agg), expected);
+
+        // correct window + window_every
+        let agg = make_read_window_aggregate(vec![make_aggregate(1)], 5, 10, None).unwrap();
+        let expected = make_storage_window(StorageAggregate::Sum, &pos_5_ns, &pos_10_ns);
+        assert_eq!(agg, expected);
+
+        // correct every + offset
+        let agg = make_read_window_aggregate(
+            vec![make_aggregate(1)],
+            0,
+            0,
+            Some(make_rpc_window(5, 0, false, 10, 0, false)),
+        )
+        .unwrap();
+        let expected = make_storage_window(StorageAggregate::Sum, &pos_5_ns, &pos_10_ns);
+        assert_eq!(agg, expected);
+
+        // correct every + offset in months
+        let agg = make_read_window_aggregate(
+            vec![make_aggregate(1)],
+            0,
+            0,
+            Some(make_rpc_window(0, 3, false, 0, 1, true)),
+        )
+        .unwrap();
+        let expected = make_storage_window(StorageAggregate::Sum, &pos_3_months, &neg_1_months);
+        assert_eq!(agg, expected);
+
+        // correct every + offset in months
+        let agg = make_read_window_aggregate(
+            vec![make_aggregate(1)],
+            0,
+            0,
+            Some(make_rpc_window(0, 1, true, 0, 3, false)),
+        )
+        .unwrap();
+        let expected = make_storage_window(StorageAggregate::Sum, &neg_1_months, &pos_3_months);
+        assert_eq!(agg, expected);
+
+        // both window + window_every and every + offset -- every + offset overrides
+        // (100 and 200 should be ignored)
+        let agg = make_read_window_aggregate(
+            vec![make_aggregate(1)],
+            5,
+            10,
+            Some(make_rpc_window(100, 0, false, 200, 0, false)),
+        )
+        .unwrap();
+        let expected = make_storage_window(StorageAggregate::Sum, &pos_5_ns, &pos_10_ns);
+        assert_eq!(agg, expected);
+
+        // invalid durations
+        let agg = make_read_window_aggregate(
+            vec![make_aggregate(1)],
+            0,
+            0,
+            Some(make_rpc_window(5, 1, false, 10, 0, false)),
+        );
+        let expected = "Error parsing window bounds duration \'window.every\': duration used as an interval cannot mix month and nanosecond units";
+        assert_eq!(error_result_to_string(agg), expected);
+
+        // invalid durations
+        let agg = make_read_window_aggregate(
+            vec![make_aggregate(1)],
+            0,
+            0,
+            Some(make_rpc_window(5, 0, false, 10, 1, false)),
+        );
+        let expected = "Error parsing window bounds duration \'window.offset\': duration used as an interval cannot mix month and nanosecond units";
+        assert_eq!(error_result_to_string(agg), expected);
+
+        // invalid durations
+        let agg = make_read_window_aggregate(
+            vec![make_aggregate(1)],
+            0,
+            0,
+            Some(make_rpc_window(5, 0, false, 0, 0, false)),
+        );
+        let expected = "Error parsing window bounds duration \'window.offset\': duration used as an interval cannot be zero";
+        assert_eq!(error_result_to_string(agg), expected);
+    }
+
+    #[test]
+    fn test_convert_group_type() {
+        assert_eq!(convert_group_type(0).unwrap(), RPCGroup::None);
+        assert_eq!(convert_group_type(2).unwrap(), RPCGroup::By);
+        assert_eq!(
+            error_result_to_string(convert_group_type(1)),
+            "Error creating aggregate: Unknown group type: 1"
+        );
+    }
+
+    #[test]
+    fn test_convert_aggregate() {
+        assert_eq!(
+            error_result_to_string(convert_aggregate(None)),
+            "Error creating aggregate: Unexpected empty aggregate"
+        );
+        assert_eq!(
+            error_result_to_string(convert_aggregate(make_aggregate_opt(0))),
+            "Error creating aggregate: Unsupported none aggregate"
+        );
+        assert_eq!(
+            convert_aggregate(make_aggregate_opt(1)).unwrap(),
+            StorageAggregate::Sum
+        );
+        assert_eq!(
+            convert_aggregate(make_aggregate_opt(2)).unwrap(),
+            StorageAggregate::Count
+        );
+        assert_eq!(
+            convert_aggregate(make_aggregate_opt(3)).unwrap(),
+            StorageAggregate::Min
+        );
+        assert_eq!(
+            convert_aggregate(make_aggregate_opt(4)).unwrap(),
+            StorageAggregate::Max
+        );
+        assert_eq!(
+            convert_aggregate(make_aggregate_opt(5)).unwrap(),
+            StorageAggregate::First
+        );
+        assert_eq!(
+            convert_aggregate(make_aggregate_opt(6)).unwrap(),
+            StorageAggregate::Last
+        );
+        assert_eq!(
+            convert_aggregate(make_aggregate_opt(7)).unwrap(),
+            StorageAggregate::Mean
+        );
+        assert_eq!(
+            error_result_to_string(convert_aggregate(make_aggregate_opt(100))),
+            "Error creating aggregate: Unknown aggregate type 100"
+        );
+    }
+
+    fn make_aggregate(t: i32) -> RPCAggregate {
+        RPCAggregate { r#type: t }
+    }
+
+    fn make_aggregate_opt(t: i32) -> Option<RPCAggregate> {
+        Some(make_aggregate(t))
+    }
+
+    fn make_rpc_window(
+        every_nsecs: i64,
+        every_months: i64,
+        every_negative: bool,
+        offset_nsecs: i64,
+        offset_months: i64,
+        offset_negative: bool,
+    ) -> RPCWindow {
+        RPCWindow {
+            every: Some(RPCDuration {
+                nsecs: every_nsecs,
+                months: every_months,
+                negative: every_negative,
+            }),
+            offset: Some(RPCDuration {
+                nsecs: offset_nsecs,
+                months: offset_months,
+                negative: offset_negative,
+            }),
+        }
+    }
+
+    fn make_storage_window(
+        agg: StorageAggregate,
+        every: &WindowDuration,
+        offset: &WindowDuration,
+    ) -> GroupByAndAggregate {
+        GroupByAndAggregate::Window {
+            agg,
+            every: every.clone(),
+            offset: offset.clone(),
         }
     }
 }
