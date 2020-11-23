@@ -1,6 +1,6 @@
-//! This module contains definitionsf or Timeseries specific Grouping
+//! This module contains definitions for Timeseries specific Grouping
 //! and Aggregate functions in IOx, designed to be compatible with
-//! InfluxDB
+//! InfluxDB classic
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Aggregate {
@@ -30,11 +30,11 @@ pub enum GroupByAndAggregate {
     /// every: Duration
     /// offset: Duration
     ///
-    /// The bounds are then calculated at a high leve by
+    /// The bounds are then calculated at a high level by
     /// bounds = truncate((time_column_reference + offset), every)
     ///
     /// Where the truncate function is different depending on the
-    /// specifics of the Duration
+    /// specific Duration
     ///
     /// This structure is different than the input (typically from gRPC)
     /// and the underyling calculation (in window.rs), so that we can do
