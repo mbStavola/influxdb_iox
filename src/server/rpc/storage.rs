@@ -22,7 +22,7 @@ use data_types::error::ErrorLogger;
 // For some reason rust thinks these imports are unused, but then
 // complains of unresolved imports if they are not imported.
 use generated_types::{node, Node};
-use query::groupby::GroupByAndAggregate;
+use query::group_by::GroupByAndAggregate;
 
 use crate::server::rpc::expr::{self, AddRPCNode, SpecialTagKeys};
 use crate::server::rpc::input::GrpcInputs;
@@ -1160,7 +1160,7 @@ mod tests {
         exec::FieldListPlan,
         exec::GroupedSeriesSetPlans,
         exec::SeriesSetPlans,
-        groupby::{Aggregate as StorageAggregate, WindowDuration as StorageWindowDuration},
+        group_by::{Aggregate as StorageAggregate, WindowDuration as StorageWindowDuration},
         id::Id,
         test::ColumnNamesRequest,
         test::FieldColumnsRequest,
