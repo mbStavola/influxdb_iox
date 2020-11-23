@@ -1,4 +1,4 @@
-//! This module has logic to translate gRPC sructures into the native
+//! This module has logic to translate gRPC structures into the native
 //! storage system form by extending the builders for those structures with new traits
 //!
 //! RPCPredicate --> storage::Predicates
@@ -490,7 +490,7 @@ pub fn make_read_group_aggregate(
     Ok(gby_agg)
 }
 
-/// Builds GroupByAndAggregate::Windows s
+/// Builds GroupByAndAggregate::Windows
 pub fn make_read_window_aggregate(
     aggregates: Vec<RPCAggregate>,
     window_every: i64,

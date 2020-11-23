@@ -1853,7 +1853,7 @@ mod tests {
 
         let expected_request = QueryGroupsRequest {
             predicate: "Predicate { exprs: [#state Eq Utf8(\"MA\")] range: TimestampRange { start: 150, end: 200 }}".into(),
-            gby_agg : GroupByAndAggregate::Columns {
+            gby_agg: GroupByAndAggregate::Columns {
                 agg: StorageAggregate::Sum,
                 group_columns: vec![String::from("tag1")],
             }
@@ -1956,7 +1956,7 @@ mod tests {
 
         let expected_request_window_every = QueryGroupsRequest {
             predicate: "Predicate { exprs: [#state Eq Utf8(\"MA\")] range: TimestampRange { start: 150, end: 200 }}".into(),
-            gby_agg : GroupByAndAggregate::Window {
+            gby_agg: GroupByAndAggregate::Window {
                 agg: StorageAggregate::Sum,
                 every: StorageWindowDuration::Fixed {
                     nanoseconds: 1122,
