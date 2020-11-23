@@ -516,27 +516,27 @@ pub fn make_read_window_aggregate(
     // exclusive. If you set either the WindowEvery or Offset with
     // nanosecond values, then the Window will be ignored
 
-    let (every, offset) = if window_every > 0 || offset > 0 {
-        // warn if window is being ignored
-        if window.is_some() {
-            warn!("window_every {} or offset {} was non zero, so ignoring window specification '{:?}' on read_window_aggregate",
-                  window_every, offset, window);
-        }
-        (
-            WindowDuration::from_nanoseconds(window_every),
-            WindowDuration::from_nanoseconds(offset),
-        )
-    } else {
-        let window = window.ok_or(Error::EmptyWindow {})?;
-
-        (
+    let (every, offset) = match (window, window_every, offset) {
+        (None, 0, 0) => return EmptyWindow {}.fail(),
+        (Some(window), 0, 0) => (
             convert_duration(window.every).map_err(|e| Error::InvalidWindowEveryDuration {
                 description: e.into(),
             })?,
             convert_duration(window.offset).map_err(|e| Error::InvalidWindowOffsetDuration {
                 description: e.into(),
             })?,
-        )
+        ),
+        (window, window_every, offset) => {
+            // warn if window is being ignored
+            if window.is_some() {
+                warn!("window_every {} or offset {} was non zero, so ignoring window specification '{:?}' on read_window_aggregate",
+                      window_every, offset, window);
+            }
+            (
+                WindowDuration::from_nanoseconds(window_every),
+                WindowDuration::from_nanoseconds(offset),
+            )
+        }
     };
 
     Ok(GroupByAndAggregate::Window { agg, every, offset })
