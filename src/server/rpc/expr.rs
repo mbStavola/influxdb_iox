@@ -545,15 +545,15 @@ pub fn make_read_window_aggregate(
 fn convert_duration(duration: Option<RPCDuration>) -> Result<WindowDuration, &'static str> {
     let duration = duration.ok_or("No duration specified in RPC")?;
 
-    match (duration.nsecs != 0, duration.months != 0) {
-        (true, false) => Ok(WindowDuration::from_nanoseconds(duration.nsecs)),
-        (false, true) => Ok(WindowDuration::from_months(
+    match (duration.nsecs, duration.months) {
+        // Same error as Go code: https://github.com/influxdata/flux/blob/master/execute/window.go#L36
+        (0, 0) => Err("duration used as an interval cannot be zero"),
+        (nsecs, 0) => Ok(WindowDuration::from_nanoseconds(nsecs)),
+        (0, _) => Ok(WindowDuration::from_months(
             duration.months,
             duration.negative,
         )),
-        // Same error as Go code: https://github.com/influxdata/flux/blob/master/execute/window.go#L36
-        (true, true) => Err("duration used as an interval cannot mix month and nanosecond units"),
-        (false, false) => Err("duration used as an interval cannot be zero"),
+        (_, _) => Err("duration used as an interval cannot mix month and nanosecond units"),
     }
 }
 
