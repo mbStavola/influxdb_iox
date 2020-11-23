@@ -49,11 +49,14 @@ pub enum Error {
     #[snafu(display("Error parsing window bounds: No window specified"))]
     EmptyWindow {},
 
-    #[snafu(display("Error parsing window bounds duration '{}': {}", location, description))]
-    InvalidDuration {
-        location: String,
-        description: String,
-    },
+    #[snafu(display("Error parsing window bounds duration 'window.every': {}", description))]
+    InvalidWindowEveryDuration { description: String },
+
+    #[snafu(display(
+        "Error parsing window bounds duration 'window.offset': {}",
+        description
+    ))]
+    InvalidWindowOffsetDuration { description: String },
 
     #[snafu(display("Internal error: found measurement tag reference in unexpected location"))]
     InternalInvalidMeasurementReference {},
@@ -527,12 +530,10 @@ pub fn make_read_window_aggregate(
         let window = window.ok_or(Error::EmptyWindow {})?;
 
         (
-            convert_duration(window.every).map_err(|e| Error::InvalidDuration {
-                location: "window.every".into(),
+            convert_duration(window.every).map_err(|e| Error::InvalidWindowEveryDuration {
                 description: e.into(),
             })?,
-            convert_duration(window.offset).map_err(|e| Error::InvalidDuration {
-                location: "window.offset".into(),
+            convert_duration(window.offset).map_err(|e| Error::InvalidWindowOffsetDuration {
                 description: e.into(),
             })?,
         )
