@@ -543,10 +543,7 @@ where
         let caps = caps
             .iter()
             .map(|(cap_name, features)| {
-                let features = features
-                    .iter()
-                    .map(|f| f.to_string())
-                    .collect::<Vec<_>>();
+                let features = features.iter().map(|f| f.to_string()).collect::<Vec<_>>();
                 (cap_name.to_string(), Capability { features })
             })
             .collect::<HashMap<String, Capability>>();
