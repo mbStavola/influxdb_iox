@@ -563,37 +563,24 @@ fn convert_aggregate(aggregate: Option<RPCAggregate>) -> Result<StorageAggregate
         Some(aggregate) => aggregate,
     };
 
-    let storage_aggregate = match convert_aggregate_type(aggregate.r#type)? {
-        RPCAggregateType::None => return NoneAggregate {}.fail(),
-        RPCAggregateType::Sum => StorageAggregate::Sum,
-        RPCAggregateType::Count => StorageAggregate::Count,
-        RPCAggregateType::Min => StorageAggregate::Min,
-        RPCAggregateType::Max => StorageAggregate::Max,
-        RPCAggregateType::First => StorageAggregate::First,
-        RPCAggregateType::Last => StorageAggregate::Last,
-        RPCAggregateType::Mean => StorageAggregate::Mean,
-    };
+    let aggregate_type = aggregate.r#type;
 
-    Ok(storage_aggregate)
-}
-
-fn convert_aggregate_type(aggregate_type: i32) -> Result<RPCAggregateType> {
     if aggregate_type == RPCAggregateType::None as i32 {
-        Ok(RPCAggregateType::None)
+        NoneAggregate {}.fail()
     } else if aggregate_type == RPCAggregateType::Sum as i32 {
-        Ok(RPCAggregateType::Sum)
+        Ok(StorageAggregate::Sum)
     } else if aggregate_type == RPCAggregateType::Count as i32 {
-        Ok(RPCAggregateType::Count)
+        Ok(StorageAggregate::Count)
     } else if aggregate_type == RPCAggregateType::Min as i32 {
-        Ok(RPCAggregateType::Min)
+        Ok(StorageAggregate::Min)
     } else if aggregate_type == RPCAggregateType::Max as i32 {
-        Ok(RPCAggregateType::Max)
+        Ok(StorageAggregate::Max)
     } else if aggregate_type == RPCAggregateType::First as i32 {
-        Ok(RPCAggregateType::First)
+        Ok(StorageAggregate::First)
     } else if aggregate_type == RPCAggregateType::Last as i32 {
-        Ok(RPCAggregateType::Last)
+        Ok(StorageAggregate::Last)
     } else if aggregate_type == RPCAggregateType::Mean as i32 {
-        Ok(RPCAggregateType::Mean)
+        Ok(StorageAggregate::Mean)
     } else {
         UnknownAggregate { aggregate_type }.fail()
     }
