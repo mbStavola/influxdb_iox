@@ -544,7 +544,7 @@ where
             .iter()
             .map(|(cap_name, features)| {
                 let features = features
-                    .into_iter()
+                    .iter()
                     .map(|f| f.to_string())
                     .collect::<Vec<_>>();
                 (cap_name.to_string(), Capability { features })

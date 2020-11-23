@@ -604,7 +604,7 @@ pub fn convert_group_type(group: i32) -> Result<RPCGroup> {
     } else if group == RPCGroup::By as i32 {
         Ok(RPCGroup::By)
     } else {
-        return UnknownGroup { group_type: group }.fail();
+        UnknownGroup { group_type: group }.fail();
     }
 }
 
